@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 
 import config
 import orchestrator
@@ -39,6 +40,8 @@ def main() -> int:
     parser.add_argument("--chat-id", default=config.DEFAULT_NOTIFY_CHAT_ID,
                         help="Telegram chat id for the completion ping. Defaults to $TELEGRAM_CHAT_ID.")
     parser.add_argument("--no-notify", action="store_true")
+    parser.add_argument("--resume", metavar="RUN_ID",
+                        help="Resume a previous run by id. Loads its saved state and skips phases already complete.")
     parser.add_argument("--verbose", "-v", action="store_true")
 
     args = parser.parse_args()
@@ -48,28 +51,39 @@ def main() -> int:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    topic = args.topic
-    seeds = list(args.seed)
-    if not topic:
-        if sys.stdin.isatty():
-            parser.error("Provide --topic or JSON via stdin")
-        data = json.load(sys.stdin)
-        topic = data["topic"]
-        seeds = data.get("seeds", []) + seeds
+    if args.resume:
+        run_state = state.load_run(args.resume)
+        # Reset the wall-clock budget so a resumed run gets a fresh window.
+        run_state.started_at = time.time()
+        run_state.time_cap_s = args.time_cap_hours * 3600
+        run_state.error = None
+        run_state.done = False
+        run_state.save()
+        print(f"resuming run_id={run_state.run_id}", file=sys.stderr)
+        print(f"phase={run_state.phase} seed_summaries={len(run_state.seed_summaries)} cost_so_far=${run_state.total_cost_usd:.2f}", file=sys.stderr)
+    else:
+        topic = args.topic
+        seeds = list(args.seed)
+        if not topic:
+            if sys.stdin.isatty():
+                parser.error("Provide --topic, --resume, or JSON via stdin")
+            data = json.load(sys.stdin)
+            topic = data["topic"]
+            seeds = data.get("seeds", []) + seeds
 
-    if not topic.strip():
-        parser.error("Empty topic")
+        if not topic.strip():
+            parser.error("Empty topic")
 
-    run_state = state.new_run(
-        topic=topic,
-        seeds=seeds,
-        time_cap_hours=args.time_cap_hours,
-        max_iterations=args.max_iterations,
-        max_parallel=args.max_parallel,
-        notify_chat_id=None if args.no_notify else args.chat_id,
-        parent_page_id=args.parent_page_id,
-    )
-    print(f"run_id={run_state.run_id}", file=sys.stderr)
+        run_state = state.new_run(
+            topic=topic,
+            seeds=seeds,
+            time_cap_hours=args.time_cap_hours,
+            max_iterations=args.max_iterations,
+            max_parallel=args.max_parallel,
+            notify_chat_id=None if args.no_notify else args.chat_id,
+            parent_page_id=args.parent_page_id,
+        )
+        print(f"run_id={run_state.run_id}", file=sys.stderr)
     print(f"dir={run_state.directory()}", file=sys.stderr)
 
     final = asyncio.run(orchestrator.run(run_state))

@@ -56,6 +56,10 @@ async def _phase_seeds(state: RunState) -> None:
         state.log("no seeds provided — skipping ingestion phase")
         return
 
+    if state.seed_summaries and len(state.seed_summaries) == len(state.seeds):
+        state.log(f"resuming: {len(state.seed_summaries)} seed summaries already on disk, skipping ingestion")
+        return
+
     descriptors = [_seed_descriptor(s) for s in state.seeds]
     prompts_list = [prompts.seed_ingest_prompt(state.topic, d) for d in descriptors]
     results = await agents.run_many(prompts_list, max_parallel=state.max_parallel, timeout_s=600)

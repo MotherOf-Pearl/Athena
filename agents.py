@@ -46,7 +46,10 @@ async def run_subagent(
     pass but bounded so a stuck subagent can't hang the whole run.
     """
     started = time.monotonic()
-    args = [config.CLAUDE_BIN, "-p", prompt, "--output-format", "json"]
+    # Pass the prompt via stdin so we never hit ARG_MAX. Some synthesis prompts
+    # carry the full set of seed summaries (~150KB+) which exceeds Linux's
+    # ~128KB argv limit and would crash with E2BIG.
+    args = [config.CLAUDE_BIN, "-p", "--output-format", "json"]
     if allowed_tools:
         args += ["--allowedTools", ",".join(allowed_tools)]
 
@@ -54,13 +57,17 @@ async def run_subagent(
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env={**os.environ},
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=prompt.encode("utf-8")),
+                timeout=timeout_s,
+            )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
