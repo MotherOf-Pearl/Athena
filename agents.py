@@ -49,7 +49,7 @@ async def run_subagent(
     # Pass the prompt via stdin so we never hit ARG_MAX. Some synthesis prompts
     # carry the full set of seed summaries (~150KB+) which exceeds Linux's
     # ~128KB argv limit and would crash with E2BIG.
-    args = [config.CLAUDE_BIN, "-p", "--bare", "--output-format", "json"]
+    args = [config.CLAUDE_BIN, "-p", "--output-format", "json"]
     if allowed_tools:
         args += ["--allowedTools", ",".join(allowed_tools)]
 
