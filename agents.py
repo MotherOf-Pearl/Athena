@@ -138,19 +138,25 @@ async def run_subagent(
 
     # Nonzero exit: try to recover the real error from stdout JSON, fall back to stderr.
     if proc.returncode != 0:
+        stderr_str = stderr.decode("utf-8", "ignore").strip()
+        stdout_str = stdout.decode("utf-8", "ignore").strip()
         if data and data.get("is_error"):
             err = str(data.get("result", "unknown"))[:500]
         else:
-            stderr_str = stderr.decode("utf-8", "ignore").strip()
-            stdout_str = stdout.decode("utf-8", "ignore").strip()
             err = stderr_str or stdout_str[:500] or f"exit {proc.returncode} with empty output"
+        # A nonzero exit with no parseable output and empty stderr/stdout is almost
+        # always an environmental crash (CLI panic, OOM, transient bun/node hiccup,
+        # silently-swallowed upstream rejection) rather than a permanent error like
+        # auth or malformed prompt — those produce a JSON error or write to stderr.
+        # Classify as transient so the retry loop can ride it out.
+        silent_crash = not data and not stderr_str and not stdout_str
         return AgentResult(
             "",
             float((data or {}).get("total_cost_usd", 0.0)),
             duration,
             int((data or {}).get("num_turns", 0)),
             error=f"exit {proc.returncode}: {err}",
-            transient=_is_transient(err) or _is_transient(stderr.decode("utf-8", "ignore")),
+            transient=silent_crash or _is_transient(err) or _is_transient(stderr_str),
             session_id=(data or {}).get("session_id"),
         )
 
