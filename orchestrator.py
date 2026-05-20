@@ -105,7 +105,7 @@ async def _phase_plan(state: RunState) -> None:
     state.save()
 
     prompt = prompts.planning_prompt(state.topic, state.seed_summaries)
-    result = await agents.run_subagent(prompt, timeout_s=300)
+    result = await agents.run_subagent_with_retry(prompt, timeout_s=300)
     state.total_cost_usd += result.cost_usd
     if result.error:
         raise RuntimeError(f"planning failed: {result.error}")
@@ -163,6 +163,14 @@ async def _phase_research_loop(state: RunState) -> None:
             new_findings.append(result.text)
             state.log(f"  research OK q={q!r} ({result.duration_s:.0f}s, ${result.cost_usd:.3f})")
 
+        # Backpressure: if 2+ subagents hit transient errors despite per-agent retries,
+        # halve max_parallel for the next iteration. Floor at 1 to keep the run progressing.
+        n_transient = agents.count_transient_failures(results)
+        if n_transient >= 2 and state.max_parallel > 1:
+            new_parallel = max(1, state.max_parallel // 2)
+            state.log(f"backpressure: {n_transient} transient failures → max_parallel {state.max_parallel} -> {new_parallel}")
+            state.max_parallel = new_parallel
+
         all_findings.extend(new_findings)
 
         # Persist this iteration's findings
@@ -185,7 +193,7 @@ async def _phase_research_loop(state: RunState) -> None:
         # Gap analysis to set up next iteration
         if iteration < state.max_iterations:
             gap_prompt = prompts.gap_analysis_prompt(state.topic, state.plan, all_findings)
-            gap_result = await agents.run_subagent(gap_prompt, timeout_s=300)
+            gap_result = await agents.run_subagent_with_retry(gap_prompt, timeout_s=300)
             state.total_cost_usd += gap_result.cost_usd
             if gap_result.error:
                 state.log(f"gap analysis FAILED: {gap_result.error}; exiting loop")
@@ -227,9 +235,12 @@ async def _phase_synthesis(state: RunState) -> None:
         raise RuntimeError("no findings to synthesize")
 
     prompt = prompts.synthesis_prompt(state.topic, findings)
-    result = await agents.run_subagent(prompt, timeout_s=1200)
+    result = await agents.run_subagent_with_retry(prompt, timeout_s=1200)
     state.total_cost_usd += result.cost_usd
     if result.error:
+        # Preserve what we have: findings/ already on disk from the research loop.
+        # The failure notification surfaces the run dir so partial work is recoverable.
+        state.partial_findings_count = len(findings)  # type: ignore[attr-defined]
         raise RuntimeError(f"synthesis failed: {result.error}")
 
     state.final_markdown = result.text
@@ -267,15 +278,24 @@ def _phase_output(state: RunState) -> None:
 
 
 def _notify_failure(state: RunState) -> None:
-    if state.notify_chat_id:
-        msg = (
-            f"Research run FAILED.\n\n"
-            f"Topic: {state.topic[:200]}\n"
-            f"Phase: {state.phase}\n"
-            f"Error: {state.error}\n"
-            f"Run dir: {state.directory()}"
-        )
-        notify.send(state.notify_chat_id, msg)
+    if not state.notify_chat_id:
+        return
+    partial = getattr(state, "partial_findings_count", 0)
+    # Count findings on disk as a backup signal (in case the attribute didn't get set).
+    if not partial:
+        findings_dir = state.directory() / "findings"
+        if findings_dir.exists():
+            partial = sum(1 for _ in findings_dir.glob("*.md"))
+    partial_line = f"\nPartial findings preserved: {partial} (see findings/ in run dir)" if partial else ""
+    msg = (
+        f"Research run FAILED.\n\n"
+        f"Topic: {state.topic[:200]}\n"
+        f"Phase: {state.phase}\n"
+        f"Error: {state.error}\n"
+        f"Run dir: {state.directory()}"
+        f"{partial_line}"
+    )
+    notify.send(state.notify_chat_id, msg)
 
 
 def _title_from_topic(topic: str) -> str:
